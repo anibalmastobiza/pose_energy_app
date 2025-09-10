@@ -1,35 +1,37 @@
 """
-Video processing module for body pose detection and movement analysis
+Simplified video processing module using optical flow instead of MediaPipe
+Alternative for Streamlit Cloud deployment issues
 """
 import cv2
-import mediapipe as mp
 import numpy as np
 
 class VideoProcessor:
     """
-    Process video files to extract body movement data using MediaPipe
+    Process video files using optical flow for movement detection
+    Alternative to MediaPipe for better compatibility
     """
     
     def __init__(self):
-        """Initialize MediaPipe pose detection"""
-        self.mp_pose = mp.solutions.pose
-        self.pose = self.mp_pose.Pose(
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-            model_complexity=1,
-            enable_segmentation=False,
-            smooth_landmarks=True
+        """Initialize video processor with optical flow parameters"""
+        self.flow_params = dict(
+            pyr_scale=0.5,
+            levels=3,
+            winsize=15,
+            iterations=3,
+            poly_n=5,
+            poly_sigma=1.2,
+            flags=0
         )
-        self.landmark_positions = []
         self.timestamps = []
+        self.motion_magnitudes = []
         
     def process_video(self, video_path, progress_bar=None):
         """
-        Process video file and extract pose landmarks
+        Process video using dense optical flow (Farneback method)
         
         Args:
             video_path: Path to video file
-            progress_bar: Streamlit progress bar object (optional)
+            progress_bar: Streamlit progress bar object
             
         Returns:
             tuple: (velocity_magnitude, acceleration, intensity)
@@ -42,132 +44,124 @@ class VideoProcessor:
         
         if fps == 0:
             fps = 30  # Default fallback
+            
+        # Read first frame
+        ret, frame1 = cap.read()
+        if not ret:
+            return None, None, None
+            
+        prvs = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
         
         frame_count = 0
+        flow_magnitudes = []
         
-        while cap.isOpened():
-            ret, frame = cap.read()
+        while True:
+            ret, frame2 = cap.read()
             if not ret:
                 break
+                
+            next_gray = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
             
-            # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame_rgb.flags.writeable = False
+            # Calculate optical flow
+            flow = cv2.calcOpticalFlowFarneback(
+                prvs, next_gray, None,
+                **self.flow_params
+            )
             
-            # Process frame
-            results = self.pose.process(frame_rgb)
+            # Calculate magnitude of flow
+            magnitude, angle = cv2.cartToPolar(flow[..., 0], flow[..., 1])
             
-            if results.pose_landmarks:
-                # Extract 33 landmarks (x, y, z coordinates)
-                landmarks = np.array([
-                    [lm.x, lm.y, lm.z] 
-                    for lm in results.pose_landmarks.landmark
-                ])
-                self.landmark_positions.append(landmarks)
-                self.timestamps.append(frame_count / fps)
+            # Average magnitude for this frame
+            avg_magnitude = np.mean(magnitude)
+            flow_magnitudes.append(avg_magnitude)
+            self.timestamps.append(frame_count / fps)
             
+            prvs = next_gray
             frame_count += 1
             
-            # Update progress bar if provided
+            # Update progress bar
             if progress_bar is not None:
                 progress_bar.progress(min(frame_count / total_frames, 1.0))
         
         cap.release()
         
-        # Analyze the collected movement data
-        return self.analyze_movement(fps)
+        # Convert to motion metrics
+        return self.analyze_motion(flow_magnitudes, fps)
     
-    def analyze_movement(self, fps):
+    def analyze_motion(self, flow_magnitudes, fps):
         """
-        Analyze collected pose data to calculate movement metrics
+        Convert optical flow to movement metrics
         
         Args:
-            fps: Frames per second of the video
+            flow_magnitudes: List of average flow magnitudes per frame
+            fps: Video frame rate
             
         Returns:
             tuple: (velocity_magnitude, acceleration, intensity)
         """
-        if len(self.landmark_positions) < 2:
+        if len(flow_magnitudes) < 2:
             return None, None, None
         
-        positions = np.array(self.landmark_positions)
+        flow_array = np.array(flow_magnitudes)
         
-        # Calculate center of mass (using torso landmarks)
-        # Using landmarks: shoulders (11,12), hips (23,24)
-        torso_indices = [11, 12, 23, 24]
-        com = np.mean(positions[:, torso_indices, :], axis=1)
+        # Normalize and scale to approximate velocity
+        # Calibration factor (pixels to meters approximation)
+        pixel_to_meter = 0.01  # Approximate conversion
+        velocity_magnitude = flow_array * pixel_to_meter * fps
         
-        # Time step
+        # Smooth the signal
+        window_size = min(5, len(velocity_magnitude) // 4)
+        if window_size > 1:
+            kernel = np.ones(window_size) / window_size
+            velocity_magnitude = np.convolve(velocity_magnitude, kernel, mode='same')
+        
+        # Calculate acceleration
         dt = 1 / fps
-        
-        # Calculate velocity (first derivative of position)
-        velocity = np.diff(com, axis=0) / dt
-        velocity_magnitude = np.linalg.norm(velocity, axis=1)
-        
-        # Calculate acceleration (second derivative of position)
-        if len(velocity) > 1:
-            acceleration = np.diff(velocity, axis=0) / dt
+        if len(velocity_magnitude) > 1:
+            acceleration = np.gradient(velocity_magnitude) / dt
+            # Convert to 2D array for compatibility
+            acceleration = np.column_stack([acceleration * 0.7, acceleration * 0.3])
         else:
-            acceleration = np.zeros_like(velocity)
+            acceleration = np.zeros((len(velocity_magnitude), 2))
         
-        # Estimate activity intensity (METs)
-        intensity = self.estimate_intensity(velocity_magnitude)
+        # Estimate intensity
+        intensity = self.estimate_intensity_from_flow(velocity_magnitude)
         
         return velocity_magnitude, acceleration, intensity
     
-    def estimate_intensity(self, velocity_magnitude):
+    def estimate_intensity_from_flow(self, velocity_magnitude):
         """
-        Estimate exercise intensity in METs from velocity data
+        Estimate METs from optical flow-based velocity
         
         Args:
-            velocity_magnitude: Array of velocity magnitudes
+            velocity_magnitude: Array of velocity estimates
             
         Returns:
             float: Estimated METs value
-            
-        Reference:
-            Ainsworth et al. (2011). Compendium of Physical Activities
         """
         mean_velocity = np.mean(velocity_magnitude)
+        std_velocity = np.std(velocity_magnitude)
         max_velocity = np.max(velocity_magnitude)
-        velocity_std = np.std(velocity_magnitude)
         
-        # Combined metric considering mean, max, and variability
-        intensity_score = mean_velocity * 0.5 + max_velocity * 0.3 + velocity_std * 0.2
+        # Combined metric
+        intensity_score = (mean_velocity * 0.5 + 
+                          max_velocity * 0.3 + 
+                          std_velocity * 0.2)
         
-        # Map to METs scale
-        if intensity_score < 0.3:
+        # Map to METs scale (adjusted for optical flow)
+        if intensity_score < 0.2:
             return 1.5  # Sedentary
-        elif intensity_score < 0.6:
+        elif intensity_score < 0.5:
             return 2.5  # Light
-        elif intensity_score < 1.0:
+        elif intensity_score < 0.8:
             return 4.0  # Light-moderate
-        elif intensity_score < 1.5:
+        elif intensity_score < 1.2:
             return 5.5  # Moderate
-        elif intensity_score < 2.0:
+        elif intensity_score < 1.6:
             return 7.0  # Moderate-vigorous
-        elif intensity_score < 2.5:
+        elif intensity_score < 2.0:
             return 8.5  # Vigorous
-        elif intensity_score < 3.0:
+        elif intensity_score < 2.5:
             return 10.0  # Very vigorous
         else:
             return 12.0  # Near maximal
-    
-    def get_landmark_names(self):
-        """
-        Get MediaPipe pose landmark names for reference
-        
-        Returns:
-            list: Names of all 33 pose landmarks
-        """
-        return [
-            "nose", "left_eye_inner", "left_eye", "left_eye_outer",
-            "right_eye_inner", "right_eye", "right_eye_outer",
-            "left_ear", "right_ear", "mouth_left", "mouth_right",
-            "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-            "left_wrist", "right_wrist", "left_pinky", "right_pinky",
-            "left_index", "right_index", "left_thumb", "right_thumb",
-            "left_hip", "right_hip", "left_knee", "right_knee",
-            "left_ankle", "right_ankle", "left_heel", "right_heel",
-            "left_foot_index", "right_foot_index"
-        ]
