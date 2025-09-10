@@ -1,0 +1,56 @@
+# Biomechanical Movement Tracker Configuration
+
+# MediaPipe Settings
+pose_detection:
+  min_detection_confidence: 0.5
+  min_tracking_confidence: 0.5
+  model_complexity: 1  # 0, 1, or 2
+  enable_segmentation: false
+  smooth_landmarks: true
+
+# Biomechanical Parameters
+energy_calculation:
+  metabolic_efficiency: 0.23  # 23% (Cavagna & Kaneko, 1977)
+  internal_work_factor: 0.1   # 10% (Willems et al., 1995)
+  gravity: 9.81               # m/s²
+
+# Protein Requirements (g/kg body weight)
+protein_factors:
+  light: 0.8      # <3 METs
+  moderate: 1.2   # 3-6 METs
+  vigorous: 1.6   # 6-9 METs
+  very_vigorous: 2.0  # >9 METs
+  minimum_dose: 20    # grams (Moore et al., 2015)
+  maximum_dose: 40    # grams
+
+# Activity Intensity Thresholds (m/s)
+velocity_thresholds:
+  sedentary: 0.3
+  light: 0.6
+  moderate: 1.0
+  moderate_vigorous: 1.5
+  vigorous: 2.0
+  very_vigorous: 2.5
+  near_maximal: 3.0
+
+# Video Processing
+video:
+  supported_formats: ['mp4', 'avi', 'mov']
+  max_file_size_mb: 500
+  default_fps: 30
+
+# Visualization
+plots:
+  height: 350
+  color_scheme:
+    velocity: '#3498db'
+    energy: '#27ae60'
+    acceleration: '#e74c3c'
+    protein: '#9b59b6'
+
+# User Defaults
+user_defaults:
+  weight_kg: 70
+  height_cm: 170
+  age: 30
+  sex: 'male'
