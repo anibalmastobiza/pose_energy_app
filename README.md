@@ -1,1 +1,1 @@
-# MediaPipe version (Python 3.10 required on Streamlit Cloud)
+# YOLOv8 Pose version (Python 3.13 compatible; dependencias más pesadas)
