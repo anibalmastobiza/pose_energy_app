@@ -1,110 +1,210 @@
-
+"""
+Main Streamlit application for biomechanical movement tracking
+Compatible with Streamlit Cloud - Using Optical Flow instead of MediaPipe
+"""
 import streamlit as st
+import tempfile
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from src.video_processor_optical import VideoProcessor
+from src.biomechanical_calculator import BiomechanicalCalculator
+from src.visualization import create_velocity_plot, create_energy_plot
 import numpy as np
-import cv2
-from ultralytics import YOLO
-import tempfile, os
-import pandas as pd
-import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Pose → Energy (kJ) + Protein (g) — YOLOv8", layout="wide")
-st.title("Video Pose Tracker → Energy (kJ) & Protein (g) (YOLOv8 Pose)")
-st.caption("Compatible con Python 3.13 (sin MediaPipe). Puede tardar más en instalar dependencias.")
-
-with st.expander("Método & supuestos"):
+def main():
+    st.set_page_config(
+        page_title="Biomechanical Movement Tracker", 
+        layout="wide",
+        page_icon="🏃"
+    )
+    
+    st.title("🏃 Biomechanical Movement Analysis")
     st.markdown("""
-**Pose:** YOLOv8n‑pose (17 keypoints).  
-**Movimiento:** desplazamiento medio cuadrático de keypoints normalizado por torso.  
-**MI→MET:** `MET = clip(1 + 2·z, 1, 12)`.  
-**Energía:** kcal/min = MET × 3.5 × masa_kg / 200 (ACSM); kJ = kcal × 4.184.  
-**Proteína:** 2–5% (hasta 10%); 17 kJ/g.
-""")
+    Upload a video to track body movement and calculate energy expenditure (Joules) 
+    and protein requirements based on biomechanically optimal formulas.
+    
+    **Note:** Using optical flow analysis for movement detection (compatible with all environments).
+    """)
+    
+    # Sidebar for user parameters
+    with st.sidebar:
+        st.header("User Parameters")
+        weight = st.number_input("Weight (kg)", min_value=30.0, max_value=200.0, value=70.0, step=0.5)
+        height = st.number_input("Height (cm)", min_value=100.0, max_value=250.0, value=170.0, step=1.0)
+        age = st.number_input("Age", min_value=10, max_value=100, value=30)
+        sex = st.selectbox("Biological Sex", ["male", "female"])
+        
+        st.markdown("---")
+        st.caption("**Scientific References:**")
+        st.caption("• Cunningham (1991) - RMR equation")
+        st.caption("• Cavagna & Kaneko (1977) - Metabolic efficiency")
+        st.caption("• ISSN Position Stand (2017) - Protein requirements")
+        st.caption("• Moore et al. (2015) - MPS optimization")
+        
+        st.markdown("---")
+        st.info("💡 **Tip:** Ensure the camera is stable and the subject's full body is visible for best results.")
+    
+    # Main content
+    uploaded_file = st.file_uploader(
+        "Choose a video file", 
+        type=['mp4', 'avi', 'mov'],
+        help="Upload a video with clear view of full body movement. Max size: 200MB"
+    )
+    
+    if uploaded_file is not None:
+        # Check file size
+        file_size = len(uploaded_file.getvalue()) / (1024 * 1024)  # Size in MB
+        if file_size > 200:
+            st.error("File size exceeds 200MB limit. Please upload a smaller video.")
+            return
+            
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tfile:
+            tfile.write(uploaded_file.read())
+            temp_path = tfile.name
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📊 Processing Video")
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # Initialize processors
+            processor = VideoProcessor()
+            calculator = BiomechanicalCalculator(weight, height, age, sex)
+            
+            # Process video
+            status_text.text("Analyzing movement patterns...")
+            try:
+                velocity, acceleration, intensity = processor.process_video(
+                    temp_path, progress_bar
+                )
+                
+                if velocity is not None and len(velocity) > 0:
+                    duration = len(processor.timestamps) if hasattr(processor, 'timestamps') else len(velocity) / 30
+                    
+                    # Calculate energy and protein
+                    energy_j = calculator.calculate_energy_expenditure(
+                        velocity, acceleration, duration
+                    )
+                    protein_g = calculator.estimate_protein_needs(energy_j, intensity)
+                    
+                    # Display results
+                    status_text.empty()
+                    st.success("✅ Analysis Complete!")
+                    
+                    st.markdown("### 📈 Results")
+                    metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
+                    with metrics_col1:
+                        st.metric(
+                            "Energy Expenditure", 
+                            f"{energy_j:.0f} J", 
+                            f"≈ {energy_j/4184:.1f} kcal",
+                            help="Total metabolic energy based on mechanical work and efficiency"
+                        )
+                    with metrics_col2:
+                        st.metric(
+                            "Protein Needs", 
+                            f"{protein_g:.1f} g",
+                            f"≈ {protein_g/weight:.2f} g/kg",
+                            help="Optimal protein for recovery based on activity intensity"
+                        )
+                    with metrics_col3:
+                        st.metric(
+                            "Activity Intensity", 
+                            f"{intensity:.1f} METs",
+                            help="Metabolic Equivalent of Task"
+                        )
+                    
+                    # Additional metrics
+                    st.markdown("### 📊 Detailed Metrics")
+                    detail_col1, detail_col2 = st.columns(2)
+                    with detail_col1:
+                        st.info(f"**Average Velocity:** {np.mean(velocity):.2f} m/s")
+                        st.info(f"**Peak Velocity:** {np.max(velocity):.2f} m/s")
+                    with detail_col2:
+                        st.info(f"**Duration:** {duration:.1f} seconds")
+                        st.info(f"**Lean Body Mass:** {calculator.lean_mass:.1f} kg")
+                else:
+                    st.error("❌ Could not detect sufficient movement in video. Please ensure the subject is moving and the video quality is good.")
+            except Exception as e:
+                st.error(f"❌ Error processing video: {str(e)}")
+                st.info("Please try with a different video or check the format.")
+        
+        with col2:
+            if 'velocity' in locals() and velocity is not None and len(velocity) > 0:
+                st.subheader("📉 Movement Analysis")
+                
+                # Create timestamps if not available
+                if not hasattr(processor, 'timestamps'):
+                    timestamps = np.linspace(0, duration, len(velocity))
+                else:
+                    timestamps = processor.timestamps[:len(velocity)]
+                
+                # Velocity plot
+                fig_velocity = create_velocity_plot(timestamps, velocity)
+                st.plotly_chart(fig_velocity, use_container_width=True)
+                
+                # Energy accumulation plot
+                energy_cumulative = np.cumsum(np.abs(velocity)) * weight * 9.81 / 0.23
+                fig_energy = create_energy_plot(timestamps, energy_cumulative)
+                st.plotly_chart(fig_energy, use_container_width=True)
+        
+        # Clean up
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+    
+    # Technical documentation
+    with st.expander("📚 Technical Documentation & Formulas"):
+        st.markdown("""
+        ### Movement Detection Method
+        
+        This application uses **Optical Flow Analysis** (Farneback method) to detect movement:
+        - Tracks pixel displacement between consecutive frames
+        - Estimates velocity from motion vectors
+        - Robust to different lighting conditions
+        
+        ### Energy Calculation Method
+        
+        **Mechanical Work Components:**
+        - Kinetic Energy: KE = ½mv²
+        - Potential Energy: PE = mgh (vertical displacement)
+        - Internal Work: ~10% of body weight × acceleration (Willems et al., 1995)
+        
+        **Total Energy Formula:**
+        ```
+        E_metabolic = (W_kinetic + W_potential + W_internal) / η + BMR_component
+        where η = 0.23 (23% efficiency)
+        ```
+        
+        ### Protein Synthesis Optimization
+        
+        **Activity-Based Requirements:**
+        - Light (<3 METs): 0.8 g/kg body weight
+        - Moderate (3-6 METs): 1.2 g/kg body weight  
+        - Vigorous (6-9 METs): 1.6 g/kg body weight
+        - Very Vigorous (>9 METs): 2.0 g/kg body weight
+        
+        **Minimum Effective Dose:** 20g (leucine threshold ~2.5g)
+        
+        ### Limitations & Assumptions
+        - Motion detection via optical flow (not pose-specific)
+        - Approximates center of mass movement
+        - Individual metabolic variations not captured
+        - Mechanical efficiency range: 20-25% (using mean 23%)
+        
+        ### References
+        1. Cavagna GA, Kaneko M. (1977). J Physiol. 268(2):467-81
+        2. Cunningham JJ. (1991). Am J Clin Nutr. 54(6):963-9
+        3. Moore DR, et al. (2015). J Appl Physiol. 119(3):290-301
+        4. Jäger R, et al. (2017). J Int Soc Sports Nutr. 14:20
+        5. Willems PA, et al. (1995). J Exp Biol. 198:379-393
+        """)
 
-st.sidebar.header("Parámetros")
-mass_kg = st.sidebar.number_input("Masa (kg)", 20.0, 300.0, 75.0, 0.5)
-sample_fps = st.sidebar.slider("FPS de análisis", 2, 30, 10)
-user_protein_frac = st.sidebar.slider("Fracción proteína (%)", 0, 15, 0)
-
-uploaded = st.file_uploader("Sube un vídeo", type=["mp4","mov","avi","mkv"])
-
-def torso_scale_from_kps_xy(xy):
-    idxs = [5,6,11,12]
-    pts = [xy[i] for i in idxs if i < len(xy)]
-    if len(pts) < 2: return 1.0
-    return max(np.linalg.norm(pts[0]-pts[-1]), 1.0)
-
-if uploaded:
-    tfile = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded.name)[1])
-    tfile.write(uploaded.read()); tfile.flush()
-    cap = cv2.VideoCapture(tfile.name)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    dur = total/max(fps,1.0)
-    st.write(f"FPS: {fps:.1f} | Frames: {total} | Duración: {dur:.1f}s")
-
-    stride = max(int(round(fps / sample_fps)), 1)
-    model = YOLO("yolov8n-pose.pt")
-
-    prev = None; mi=[]; t=[]; idx=0
-    preview=[]; preview_every = max(int(sample_fps),1)
-
-    while True:
-        ret, frame = cap.read()
-        if not ret: break
-        if idx % stride != 0:
-            idx += 1; continue
-        h,w=frame.shape[:2]
-        res = model(frame, verbose=False)[0]
-        xy = None
-        if res.keypoints is not None and len(res.keypoints)>0:
-            xyn = res.keypoints.xyn[0].cpu().numpy()  # (17,2) [0,1]
-            xy = xyn * np.array([w,h], dtype=np.float32)
-        if xy is not None:
-            if prev is not None:
-                scale = torso_scale_from_kps_xy(xy) or 1.0
-                disp = np.mean(((xy - prev)/scale)**2)
-                mi.append(disp); t.append(idx/max(fps,1.0))
-            else:
-                mi.append(0.0); t.append(idx/max(fps,1.0))
-            prev = xy
-            if len(preview) < 12 and idx % (preview_every*stride) == 0:
-                annotated = res.plot()
-                import cv2 as _cv2
-                preview.append(_cv2.cvtColor(annotated, _cv2.COLOR_BGR2RGB))
-        idx += 1
-    cap.release()
-
-    if len(mi)==0:
-        st.error("No se detectó la pose. Prueba con mejor iluminación y cuerpo completo en el encuadre.")
-        st.stop()
-
-    mi=np.array(mi); med=np.median(mi); mad=np.median(np.abs(mi-med)) or 1e-6
-    z=(mi-med)/(1.4826*mad)
-    met=np.clip(1+2*z,1,12); mean_met=float(np.mean(met))
-
-    prot_frac = user_protein_frac/100 if user_protein_frac>0 else (0.02 if mean_met<=3 else 0.03 if mean_met<=6 else 0.05)
-
-    kcal_min = met*3.5*mass_kg/200.0
-    frame_dt = stride/max(fps,1.0)
-    kcal_total = float(np.sum(kcal_min/60.0 * frame_dt))
-    kJ_total = kcal_total*4.184
-    protein_g = (kJ_total*prot_frac)/17.0
-
-    st.subheader("Resultados")
-    c1,c2,c3 = st.columns(3)
-    c1.metric("Energía total (kJ)", f"{kJ_total:.1f}")
-    c2.metric("Energía total (kcal)", f"{kcal_total:.1f}")
-    c3.metric("Proteína oxidada (g)", f"{protein_g:.2f}")
-
-    st.subheader("MET estimado")
-    st.line_chart({"MET": met}, x=t)
-
-    df = pd.DataFrame({"time_s":t,"movement_index":mi,"MET":met,"kcal_per_min":kcal_min})
-    st.download_button("Descargar CSV", df.to_csv(index=False), "per_frame_metrics.csv")
-
-    if preview:
-        st.subheader("Previsualización anotada")
-        st.image(preview, use_column_width=True)
-
-else:
-    st.info("Sube un vídeo para comenzar.")
+if __name__ == "__main__":
+    main()
